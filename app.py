@@ -214,9 +214,16 @@ async def call_llm(role, market, prior):
             vote = "WAIT"
         return {"role": role, "vote": vote, "reason": str(value.get("reason", ""))[:500],
                 "connected": True, "source": "model"}
-    except Exception:
+    except Exception as exc:
         # Модель недоступна или ответила мусором — НЕ теряем анализ.
-        return role_vote(role, market, prior)
+        # Причину ВИДНО в ответе: молчаливый откат уже один раз спрятал
+        # поломку (05.11.26: модель возвращала пустой content, все роли
+        # отвечали формулами, и понять это было нечем).
+        fallback = role_vote(role, market, prior)
+        fallback["model_error"] = f"{type(exc).__name__}: {str(exc)[:180]}"
+        fallback["model_model"] = model
+        fallback["model_base"] = root
+        return fallback
 
 
 def decide(market, agents):
