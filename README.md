@@ -32,7 +32,7 @@ Independent **read-only** six-role analytical room. Runs on Railway from branch
 
 ## Scope
 Responsive trading room with 6 role cards, read-only Hyperliquid market snapshots
-(BTC, ETH, SOL, HYPE), 2-hour momentum, order-book imbalance and a rule-based
+(12 самых ликвидных: BTC, ETH, HYPE, ZEC, SOL, NEAR, XRP, XMR, PUMP, TRUMP, LIT, WLD), 2-hour momentum, order-book imbalance and a rule-based
 baseline. Agent outputs saved to SQLite; no secret keys are sent to browsers.
 All results are advisory; real orders are **not implemented**.
 No claim of profitability.
