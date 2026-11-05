@@ -27,12 +27,12 @@ ENDPOINT = ("https://api.hyperliquid-testnet.xyz/info" if NETWORK == "testnet"
 # только как страховка на случай, если поток не поднялся.
 WS_URL = ("wss://api.hyperliquid-testnet.xyz/ws" if NETWORK == "testnet"
           else "wss://api.hyperliquid.xyz/ws")
-COINS = set(COIN_LIST)
 # 12 самых ликвидных монет Hyperliquid (05.11.26, по объёму за сутки).
 # Было четыре — владелец спросил «не мало ли». Отбор: топ-12 по объёму 24ч,
 # чтобы стакан был плотный и сигналы не по пустым книгам.
 COIN_LIST = ("BTC", "ETH", "HYPE", "ZEC", "SOL", "NEAR",
              "XRP", "XMR", "PUMP", "TRUMP", "LIT", "WLD")
+COINS = set(COIN_LIST)
 LOOP_SECONDS = 90          # как часто смотрим рынок (бесплатно)
 COUNCIL_COOLDOWN = 600     # не чаще раза в 10 минут зовём модель по монете
 ROLES = ("Scout", "Chart", "Orderflow", "News", "Skeptic", "Chief")
