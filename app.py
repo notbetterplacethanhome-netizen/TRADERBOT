@@ -391,7 +391,13 @@ def decide(market, agents):
 # модель зовём ТОЛЬКО когда правило рынка нашло повод. Иначе каждый круг стоил
 # бы 24 запроса к модели впустую.
 STATE = {"markets": {}, "council": {}, "updated_ms": 0, "rounds": 0,
-         "signals": 0, "last_signal_ms": 0}
+         "signals": 0, "last_signal_ms": 0, "events": [], "next_round_ms": 0}
+
+
+def add_event(text, kind="info"):
+    """Строка журнала: по ней видно, что бот живой и что он делал."""
+    STATE["events"].insert(0, {"ts": int(time.time() * 1000), "text": text, "kind": kind})
+    del STATE["events"][40:]
 _state_mtime = {}
 
 
@@ -417,6 +423,9 @@ async def watch_loop():
     await asyncio.sleep(3)
     while True:
         STATE["rounds"] += 1
+        rnd = STATE["rounds"]
+        add_event(f"круг {rnd}: смотрю рынок")
+        found = []
         for coin in COIN_LIST:
             try:
                 m = await snapshot(coin)
@@ -425,6 +434,7 @@ async def watch_loop():
                 base = baseline(m)
                 if base == "WAIT":
                     continue
+                found.append(f"{coin} {base}")
                 # Повод есть — зовём совет, но не чаще раза в COOLDOWN.
                 now = time.time()
                 if now - _state_mtime.get(coin, 0) < COUNCIL_COOLDOWN:
@@ -435,8 +445,17 @@ async def watch_loop():
                 if data["decision"] in ("LONG", "SHORT"):
                     STATE["signals"] += 1
                     STATE["last_signal_ms"] = data["ts"]
-            except Exception:
+                    add_event(f"СИГНАЛ {data['decision']} {coin}: совет и правило сошлись", "signal")
+                else:
+                    add_event(f"{coin}: правило {base}, но совет воздержался", "wait")
+            except Exception as exc:
+                add_event(f"{coin}: сбой данных ({type(exc).__name__})", "err")
                 continue
+        if found:
+            add_event("повод есть: " + ", ".join(found))
+        else:
+            add_event(f"круг {rnd}: повода нет — жду")
+        STATE["next_round_ms"] = int((time.time() + LOOP_SECONDS) * 1000)
         await asyncio.sleep(LOOP_SECONDS)
 
 
@@ -463,6 +482,7 @@ async def latest():
             "updated_ms": STATE["updated_ms"], "rounds": STATE["rounds"],
             "signals": STATE["signals"], "last_signal_ms": STATE["last_signal_ms"],
             "loop_seconds": LOOP_SECONDS, "exchange": NETWORK,
+            "events": STATE["events"], "next_round_ms": STATE["next_round_ms"],
             "feed": {"ready": FEED.ready, "messages": FEED.messages,
                      "reconnects": FEED.reconnects, "last_ms": FEED.last_ms,
                      "fresh": FEED.fresh()},
