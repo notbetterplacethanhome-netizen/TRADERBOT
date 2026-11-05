@@ -174,6 +174,26 @@ def role_vote(role, m, prior):
     return out("WAIT", "роль не определена")
 
 
+def normalize_base(url):
+    """Приводим адрес API к правильному виду.
+
+    05.11.26 владелец указал https://platform.deepseek.com — это ВЕБ-САЙТ, а не
+    API: запрос вернул 405 Method Not Allowed, и все шесть ролей молча ушли на
+    формулы. Та же беда с api.deepseek.com без /v1. Чиним сами, чтобы одна
+    опечатка не выключала половину приложения.
+    """
+    u = (url or "").strip().rstrip("/")
+    if not u:
+        return "https://api.openai.com/v1"
+    if "platform.deepseek.com" in u:
+        return "https://api.deepseek.com/v1"
+    if u.endswith("/chat/completions"):
+        u = u[: -len("/chat/completions")]
+    if u in ("https://api.deepseek.com", "http://api.deepseek.com"):
+        return "https://api.deepseek.com/v1"
+    return u
+
+
 # ---------------------------------------------------------------- роли через ИИ
 async def call_llm(role, market, prior):
     """Модель как ОПЦИЯ. Если ключ не задан — молча уходим на формулы."""
@@ -181,7 +201,7 @@ async def call_llm(role, market, prior):
     model = os.getenv("ROOM_SIX_LLM_MODEL", "")
     if not key or not model:
         return role_vote(role, market, prior)
-    root = os.getenv("ROOM_SIX_LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    root = normalize_base(os.getenv("ROOM_SIX_LLM_BASE_URL", "https://api.openai.com/v1"))
     msg = ("You are " + role + " in an audit-focused crypto paper-analysis team. "
            "Use ONLY supplied public market data. News has no feed and MUST abstain. "
            "Return one JSON object with keys vote (LONG, SHORT, WAIT) and reason. "
