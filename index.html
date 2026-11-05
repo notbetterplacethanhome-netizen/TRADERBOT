@@ -1,14 +1,155 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ROOM SIX — Hyperliquid</title><style>
-:root{font-family:Inter,system-ui,Arial,sans-serif;color:#29272a;background:#f6f4f0}*{box-sizing:border-box}body{margin:0}.shell{max-width:1360px;margin:auto;padding:28px}.header{display:flex;justify-content:space-between;align-items:center;gap:16px;padding-bottom:24px;border-bottom:1px solid #e6e2dc}.logo{font-size:24px;font-weight:900;letter-spacing:-1.5px}.logo b{color:#fb683b}.tag{border:1px solid #e5dfd6;border-radius:24px;padding:8px 12px;color:#777;font-size:12px}.hero{padding:44px 0 25px}.hero h1{font-size:clamp(36px,6vw,70px);letter-spacing:-4px;margin:0 0 10px;line-height:1}.muted{color:#8a8790}.layout{display:grid;grid-template-columns:1.25fr .8fr;gap:16px}.card{background:white;border:1px solid #ebe7e2;border-radius:22px;padding:24px;box-shadow:0 8px 26px #24120c08}.room{min-height:370px}.agents{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:28px}.agent{text-align:center;background:#faf9f7;border-radius:17px;padding:20px 8px}.avatar{margin:auto auto 9px;width:82px;height:92px;border-radius:42px 42px 30px 30px;position:relative;box-shadow:inset -10px -9px #00000012}.avatar:before,.avatar:after{content:"";background:#fff;position:absolute;top:32px;width:10px;height:12px;border-radius:100%}.avatar:before{left:24px}.avatar:after{right:24px}.a0{background:#f06445}.a1{background:#5a87dd}.a2{background:#ffbd4a}.a3{background:#8cc58e}.a4{background:#c68bd6}.a5{background:#525c69}.name{font-weight:800;font-size:14px}.role{font-size:11px;color:#888;margin-top:4px}.row{display:flex;justify-content:space-between;align-items:center;gap:12px}.price{font-size:38px;font-weight:800;letter-spacing:-1px}.big{font-size:21px;font-weight:800}.stat{margin-top:16px;padding:14px;background:#f7f6f3;border-radius:12px}.stat span{color:#777}.buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:20px}button,input,select{font:inherit;border-radius:12px;padding:12px 14px;border:1px solid #e5ded7;background:#fff}button{cursor:pointer}button.primary{background:#232528;color:#fff;border-color:#232528}button:disabled{opacity:.5}input{width:100%}.chat{margin-top:16px}.feed{max-height:430px;overflow:auto;display:flex;flex-direction:column;gap:10px;margin-top:12px}.msg{background:#f8f6f4;padding:14px;border-radius:13px;font-size:13px;line-height:1.55}.msg strong{display:block;margin-bottom:4px}footer{margin:30px 0;font-size:12px;color:#928f8e}@media(max-width:850px){.layout{grid-template-columns:1fr}.shell{padding:16px}.agents{gap:7px}.agent{padding:12px 3px}.avatar{width:55px;height:61px}.avatar:before,.avatar:after{top:22px;width:7px;height:8px}.avatar:before{left:17px}.avatar:after{right:17px}.name{font-size:11px}.role{font-size:9px}.hero h1{letter-spacing:-2px}}
-</style></head><body><div class="shell"><header class="header"><div class="logo">ROOM <b>SIX.</b></div><div class="tag">HYPERLIQUID · READ ONLY</div></header><div class="hero"><h1>Комната решений.</h1><p class="muted">Шесть аналитических ролей. Один рынок. Никаких выдуманных сигналов.</p></div><main class="layout"><section class="card room"><div class="row"><div><div class="big">Команда на связи</div><div class="muted">Мультиагентный аналитический совет</div></div><span class="tag" id="status">OFFLINE</span></div><div class="agents" id="agents"></div><div class="buttons"><button class="primary" id="run">Собрать совет</button><select id="coin"><option>BTC</option><option>ETH</option><option>SOL</option><option>HYPE</option></select></div><div class="stat"><strong id="decision">Ожидание анализа</strong><p class="muted" id="hint">Нет приказов на биржу. Только аналитика.</p></div></section><div><section class="card"><div class="row"><strong>Рынок</strong><span class="tag" id="network">Hyperliquid</span></div><div class="price" id="price">—</div><p class="muted" id="change">Ожидание соединения</p><div class="stat row"><span>Давление стакана</span><strong id="imb">—</strong></div><div class="stat row"><span>Правило рынка</span><strong id="base">—</strong></div></section><section class="card chat"><strong>Доступ к аналитике</strong><p class="muted">Токен хранится только в этой вкладке.</p><input type="password" id="token" placeholder="ROOM_SIX_TOKEN"><div class="buttons"><button id="connect">Подключиться</button><button id="refresh">Обновить рынок</button></div></section></div></main><section class="card chat"><div class="row"><strong>Обсуждение команды</strong><span class="tag">AUDIT LOG</span></div><div class="feed" id="feed"><div class="msg">Нажми «Собрать совет», чтобы получить последовательные мнения шести ролей.</div></div></section><footer>ROOM SIX — прототип аналитической платформы. Реальные сделки отключены. Анализ ИИ не является финансовой рекомендацией.</footer></div><script>
-const roles=[['Шеф','Chief'],['Разведчик','Scout'],['График','Chart'],['Поток','Orderflow'],['Новости','News'],['Скептик','Skeptic']];
-document.getElementById('agents').innerHTML=roles.map((r,i)=>'<div class="agent"><div class="avatar a'+i+'"></div><div class="name">'+r[0]+'</div><div class="role">'+r[1]+'</div></div>').join('');
-let token='';
-const el=id=>document.getElementById(id);
-const say=(s)=>{let node=document.createElement('div');node.className='msg';node.textContent=s;el('feed').prepend(node)};
-async function req(path,post=false){let r=await fetch(path,{method:post?'POST':'GET',headers:{Authorization:'Bearer '+token}});if(!r.ok)throw Error('HTTP '+r.status);return r.json()}
-async function update(){try{let m=await req('/api/market/'+el('coin').value);el('price').textContent='$'+m.price.toLocaleString('en-US');el('change').textContent='2ч: '+m.change_2h_pct+'%';el('imb').textContent=(m.orderbook_imbalance*100).toFixed(1)+'%';el('network').textContent=m.network;el('status').textContent='ONLINE'}catch(e){el('status').textContent='ERROR';say('Нет подключения: '+e.message)}}
-el('connect').onclick=()=>{token=el('token').value;el('token').value='';update()};
-el('refresh').onclick=update;el('coin').onchange=()=>{if(token)update()};
-el('run').onclick=async()=>{let b=el('run');b.disabled=true;el('decision').textContent='Совет обсуждает рынок…';try{let d=await req('/api/agents/deliberate/'+el('coin').value,true);el('decision').textContent=d.decision;el('base').textContent=d.baseline;el('hint').textContent='Рекомендация, не ордер';for(let a of d.agents){let msg=el('feed').insertBefore(document.createElement('div'),el('feed').firstChild);msg.className='msg';let strong=document.createElement('strong');strong.textContent=a.role+' · '+a.vote;msg.append(strong,document.createTextNode(a.reason))}await update()}catch(e){el('decision').textContent='Ошибка';say(e.message)}finally{b.disabled=false}};
-</script></body></html>
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ROOM SIX — Hyperliquid</title>
+<style>
+:root{--ink:#29272a;--mut:#8a8790;--line:#e6e2dc;--bg:#f6f4f0;--card:#fff;--ac:#fb683b;--up:#1f9d55;--dn:#d93a3a}
+*{box-sizing:border-box}
+body{margin:0;font-family:Inter,system-ui,Arial,sans-serif;color:var(--ink);background:var(--bg)}
+.shell{max-width:1180px;margin:auto;padding:22px 18px 40px}
+.header{display:flex;justify-content:space-between;align-items:center;gap:14px;padding-bottom:18px;border-bottom:1px solid var(--line)}
+.logo{font-size:23px;font-weight:900;letter-spacing:-1.4px}.logo b{color:var(--ac)}
+.tag{border:1px solid var(--line);border-radius:22px;padding:7px 12px;color:var(--mut);font-size:12px;white-space:nowrap}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--up);margin-right:6px;animation:pulse 2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 #1f9d5555}70%{box-shadow:0 0 0 7px #1f9d5500}100%{box-shadow:0 0 0 0 #1f9d5500}}
+.hero{padding:26px 0 16px}.hero h1{font-size:clamp(28px,5vw,44px);letter-spacing:-2px;margin:0 0 6px}
+.muted{color:var(--mut)}
+.banner{margin:16px 0;border-radius:20px;padding:20px 22px;background:#fff;border:1px solid var(--line);box-shadow:0 8px 26px #24120c08}
+.banner.wait{border-left:5px solid var(--mut)}
+.banner.signal{border-left:5px solid var(--up);background:#f2fbf5}
+.banner b{font-size:22px;letter-spacing:-.6px;display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:6px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:0 6px 20px #24120c06}
+.coin{display:flex;justify-content:space-between;align-items:baseline}
+.coin .n{font-size:17px;font-weight:800}.coin .p{font-size:17px;font-weight:800;letter-spacing:-.5px}
+.kv{display:flex;justify-content:space-between;font-size:12.5px;color:var(--mut);margin-top:9px}
+.kv b{color:var(--ink);font-weight:700}
+.up{color:var(--up)}.dn{color:var(--dn)}
+.pill{font-size:10px;font-weight:800;letter-spacing:.06em;padding:3px 8px;border-radius:7px}
+.pill.long{color:var(--up);background:#1f9d5515}.pill.short{color:var(--dn);background:#d93a3a15}
+.pill.wait{color:var(--mut);background:#8a879015}
+.sec{margin-top:26px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);font-weight:800}
+.agents{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-top:10px}
+.agent{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px}
+.agent .r{display:flex;justify-content:space-between;align-items:center}
+.agent .nm{font-weight:800;font-size:14px}
+.agent .rs{font-size:12.5px;color:var(--mut);margin-top:7px;line-height:1.45}
+.empty{background:#fff;border:1px dashed var(--line);border-radius:16px;padding:18px;color:var(--mut);font-size:13.5px}
+.foot{margin-top:28px;padding-top:16px;border-top:1px solid var(--line);font-size:12px;color:var(--mut)}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="header">
+    <div class="logo">ROOM <b>SIX.</b></div>
+    <div class="tag"><span class="dot" id="dot"></span><span id="status">автономный режим</span></div>
+  </header>
+
+  <div class="hero">
+    <h1>Комната решений.</h1>
+    <p class="muted">Шесть ролей. Один рынок. Смотрит сам, решает только когда сигнал сильный.</p>
+  </div>
+
+  <div class="banner wait" id="banner">
+    <b id="bannerTitle">ЖДЁМ ИДЕАЛЬНОГО СОВЕТА</b>
+    <span class="muted" id="bannerSub">кругов: 0 · сигналов: 0</span>
+  </div>
+
+  <div class="sec">Рынок</div>
+  <div class="grid" id="coins"><div class="empty">Загружаю данные…</div></div>
+
+  <div class="sec">Совет шести ролей</div>
+  <div class="agents" id="agents"><div class="empty">Совет соберётся сам, когда правило рынка найдёт повод.</div></div>
+
+  <div class="foot">
+    Только аналитика. Ордера на биржу не отправляются. Не финансовая рекомендация.<br>
+    <span id="stamp">—</span>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const fmtPrice = p => p >= 1000 ? '$' + Math.round(p).toLocaleString('en-US')
+                    : '$' + p.toLocaleString('en-US', {maximumFractionDigits: 4});
+const pct = v => (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
+const ROLES = ['Scout','Chart','Orderflow','News','Skeptic','Chief'];
+const NAMES = {Scout:'Разведчик', Chart:'График', Orderflow:'Поток', News:'Новости', Skeptic:'Скептик', Chief:'Шеф'};
+
+function renderCoins(markets){
+  const keys = Object.keys(markets);
+  if(!keys.length){ $('coins').innerHTML = '<div class="empty">Ещё ни одного круга — подожди минуту.</div>'; return; }
+  $('coins').innerHTML = keys.map(k => {
+    const m = markets[k];
+    const chg = m.change_2h_pct, imb = m.orderbook_imbalance, tr = m.trend_pct || 0;
+    const base = (m.change_2h_pct > 0.3 && imb > 0.12) ? 'LONG'
+               : (m.change_2h_pct < -0.3 && imb < -0.12) ? 'SHORT' : 'WAIT';
+    const cls = base === 'LONG' ? 'long' : base === 'SHORT' ? 'short' : 'wait';
+    return `<div class="card">
+      <div class="coin"><span class="n">${k}</span><span class="p">${fmtPrice(m.price)}</span></div>
+      <div class="kv"><span>2 часа</span><b class="${chg>=0?'up':'dn'}">${pct(chg)}</b></div>
+      <div class="kv"><span>Стакан</span><b class="${imb>=0?'up':'dn'}">${pct(imb*100)}</b></div>
+      <div class="kv"><span>Тренд</span><b class="${tr>=0?'up':'dn'}">${pct(tr)}</b></div>
+      <div class="kv"><span>Правило</span><span class="pill ${cls}">${base}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function renderCouncil(council){
+  const keys = Object.keys(council);
+  if(!keys.length){
+    $('agents').innerHTML = '<div class="empty">Совет соберётся сам, когда правило рынка найдёт повод. Сейчас повода нет — это нормально.</div>';
+    return;
+  }
+  const k = keys[keys.length - 1], d = council[k];
+  const byRole = {};
+  (d.agents || []).forEach(a => byRole[a.role] = a);
+  $('agents').innerHTML = ROLES.map(r => {
+    const a = byRole[r]; if(!a) return '';
+    const v = a.vote, cls = v === 'LONG' ? 'long' : v === 'SHORT' ? 'short' : 'wait';
+    const src = a.source === 'model' ? 'модель' : 'формула';
+    return `<div class="agent">
+      <div class="r"><span class="nm">${NAMES[r] || r}</span><span class="pill ${cls}">${v}</span></div>
+      <div class="rs">${(a.reason || '').replace(/</g,'&lt;')}</div>
+      <div class="rs" style="opacity:.6;font-size:11px">${k} · источник: ${src}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderBanner(data){
+  const council = data.council || {};
+  const keys = Object.keys(council);
+  let best = null;
+  keys.forEach(k => { const d = council[k]; if(d && (d.decision === 'LONG' || d.decision === 'SHORT')) best = d; });
+  const b = $('banner');
+  if(best){
+    b.className = 'banner signal';
+    $('bannerTitle').textContent = 'СИГНАЛ: ' + best.decision + ' ' + best.market.coin;
+    $('bannerSub').textContent = 'правило рынка: ' + best.baseline + ' · шесть ролей согласны';
+  }else{
+    b.className = 'banner wait';
+    $('bannerTitle').textContent = 'ЖДЁМ ИДЕАЛЬНОГО СОВЕТА';
+    $('bannerSub').textContent = 'кругов: ' + (data.rounds || 0) + ' · сигналов: ' + (data.signals || 0);
+  }
+}
+
+async function tick(){
+  try{
+    const r = await fetch('/api/latest', {cache:'no-store'});
+    const d = await r.json();
+    renderCoins(d.markets || {});
+    renderCouncil(d.council || {});
+    renderBanner(d);
+    $('status').textContent = 'автономный · ' + (d.model_enabled ? 'ИИ включён' : 'формулы');
+    $('dot').style.background = '#1f9d55';
+    $('stamp').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU')
+      + ' · рынок: ' + (d.exchange || '—') + ' · круг каждые ' + (d.loop_seconds || 90) + ' с';
+  }catch(e){
+    $('status').textContent = 'нет связи';
+    $('dot').style.background = '#d93a3a';
+  }
+}
+tick(); setInterval(tick, 8000);
+</script>
+</body>
+</html>

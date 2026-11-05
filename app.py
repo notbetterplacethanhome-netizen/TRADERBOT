@@ -11,6 +11,7 @@ import os, json, re, time, secrets, asyncio, sqlite3, statistics
 from pathlib import Path
 from typing import Optional
 import httpx
+import websockets
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -22,7 +23,14 @@ DB = os.getenv("ROOM_SIX_DB", "/tmp/room-six.db")
 NETWORK = os.getenv("HYPERLIQUID_NETWORK", "mainnet")
 ENDPOINT = ("https://api.hyperliquid-testnet.xyz/info" if NETWORK == "testnet"
             else "https://api.hyperliquid.xyz/info")
+# WebSocket — основной источник данных (05.11.26, слово владельца). REST остаётся
+# только как страховка на случай, если поток не поднялся.
+WS_URL = ("wss://api.hyperliquid-testnet.xyz/ws" if NETWORK == "testnet"
+          else "wss://api.hyperliquid.xyz/ws")
 COINS = {"BTC", "ETH", "SOL", "HYPE"}
+COIN_LIST = ("BTC", "ETH", "SOL", "HYPE")
+LOOP_SECONDS = 90          # как часто смотрим рынок (бесплатно)
+COUNCIL_COOLDOWN = 600     # не чаще раза в 10 минут зовём модель по монете
 ROLES = ("Scout", "Chart", "Orderflow", "News", "Skeptic", "Chief")
 
 # Пороги ролей. Меняются осознанно, как и всё в торговле.
@@ -60,8 +68,133 @@ def clean_coin(coin):
     return coin
 
 
+class MarketFeed:
+    """Живой поток Hyperliquid: цены, стакан и свечи по WebSocket.
+
+    Опрос REST каждые 90 секунд — это десятки запросов в минуту и данные с
+    задержкой. Поток отдаёт изменения мгновенно и одним соединением.
+    """
+
+    def __init__(self):
+        self.prices = {}
+        self.books = {}
+        self.candles = {c: [] for c in COIN_LIST}
+        self.ready = False
+        self.last_ms = 0
+        self.reconnects = 0
+        self.messages = 0
+
+    async def start(self):
+        while True:
+            try:
+                await self._run()
+            except Exception:
+                self.reconnects += 1
+                self.ready = False
+                await asyncio.sleep(3)
+
+    async def _fill_history(self):
+        """Однократно добираем историю свечей: поток отдаёт только текущую."""
+        for coin in COIN_LIST:
+            try:
+                arr = await info({"type": "candleSnapshot", "req": {
+                    "coin": coin, "interval": "15m",
+                    "startTime": int(time.time() * 1000) - 15 * 60 * 1000 * 80}})
+                self.candles[coin] = arr[-80:]
+            except Exception:
+                pass
+
+    async def _run(self):
+        await self._fill_history()
+        async with websockets.connect(WS_URL, ping_interval=20, open_timeout=20) as ws:
+            for coin in COIN_LIST:
+                await ws.send(json.dumps({"method": "subscribe",
+                                          "subscription": {"type": "l2Book", "coin": coin}}))
+                await ws.send(json.dumps({"method": "subscribe",
+                                          "subscription": {"type": "candle",
+                                                           "coin": coin, "interval": "15m"}}))
+            await ws.send(json.dumps({"method": "subscribe",
+                                      "subscription": {"type": "allMids"}}))
+            self.ready = True
+            async for raw in ws:
+                try:
+                    self._apply(json.loads(raw))
+                    self.messages += 1
+                    self.last_ms = int(time.time() * 1000)
+                except Exception:
+                    continue
+
+    def _apply(self, d):
+        ch = d.get("channel")
+        data = d.get("data")
+        if ch == "allMids" and isinstance(data, dict):
+            self.prices.update(data.get("mids") or {})
+        elif ch == "l2Book" and isinstance(data, dict):
+            coin = data.get("coin")
+            if coin:
+                self.books[coin] = data
+        elif ch == "candle" and data:
+            c = data[0] if isinstance(data, list) else data
+            coin = c.get("s") or c.get("coin")
+            if not coin:
+                return
+            arr = self.candles.setdefault(coin, [])
+            t_ms = int(c.get("t", 0))
+            if arr and int(arr[-1].get("t", 0)) == t_ms:
+                arr[-1] = c
+            elif not arr or int(arr[-1].get("t", 0)) < t_ms:
+                arr.append(c)
+                if len(arr) > 200:
+                    del arr[:-200]
+
+    def fresh(self, max_age=90):
+        return self.ready and self.last_ms and (time.time() * 1000 - self.last_ms) < max_age * 1000
+
+
+FEED = MarketFeed()
+
+
+def _snapshot_from_feed(coin):
+    book = FEED.books.get(coin) or {}
+    levels = book.get("levels", [[], []])
+
+    def total(arr):
+        return sum(float(x.get("sz", 0)) for x in arr[:10])
+
+    bid, ask = total(levels[0]), total(levels[1])
+    price = float(FEED.prices.get(coin, 0) or 0)
+    candles = FEED.candles.get(coin) or []
+    close = [float(c["c"]) for c in candles if "c" in c]
+    if not price and close:
+        price = close[-1]
+    change = (close[-1] / close[-9] - 1) * 100 if len(close) > 9 and close[-9] > 0 else 0
+    imbalance = (bid - ask) / (bid + ask) if bid + ask > 0 else 0
+    trend = 0.0
+    if len(close) >= 20:
+        sma = sum(close[-20:]) / 20
+        trend = (price / sma - 1) * 100 if sma > 0 else 0.0
+    vol = 0.0
+    if len(close) > 6:
+        rets = [(close[k] / close[k - 1] - 1) * 100 for k in range(len(close) - 5, len(close))]
+        vol = statistics.pstdev(rets) if len(rets) > 1 else 0.0
+    return {"coin": coin, "price": price, "change_2h_pct": round(change, 4),
+            "orderbook_imbalance": round(imbalance, 4), "bid_top10": bid, "ask_top10": ask,
+            "trend_pct": round(trend, 4), "volatility_pct": round(vol, 4),
+            "last_close": close[-1] if close else None, "sample_size": len(close),
+            "time_ms": int(time.time() * 1000), "network": NETWORK, "source": "websocket"}
+
+
 async def snapshot(coin):
-    """Рыночный снимок: цена, импульс 2ч, тренд, стакан, волатильность."""
+    """Снимок из потока; если поток молчит — идём в REST."""
+    coin = clean_coin(coin)
+    if FEED.fresh():
+        snap = _snapshot_from_feed(coin)
+        if snap["price"] > 0 and snap["sample_size"] >= 12:
+            return snap
+    return await snapshot_rest(coin)
+
+
+async def snapshot_rest(coin):
     coin = clean_coin(coin)
     book, candles, mids = await asyncio.gather(
         info({"type": "l2Book", "coin": coin}),
@@ -80,12 +213,10 @@ async def snapshot(coin):
     price = float(mids.get(coin, 0))
     change = (close[-1] / close[-9] - 1) * 100 if len(close) > 9 and close[-9] > 0 else 0
     imbalance = (bid - ask) / (bid + ask) if bid + ask > 0 else 0
-    # Тренд: насколько цена выше средней за 20 свечей (в процентах).
     trend = 0.0
     if len(close) >= 20:
         sma = sum(close[-20:]) / 20
         trend = (price / sma - 1) * 100 if sma > 0 else 0.0
-    # Волатильность: разброс часовых доходностей в процентах.
     vol = 0.0
     if len(close) > 6:
         rets = [(close[k] / close[k - 1] - 1) * 100 for k in range(len(close) - 5, len(close))]
@@ -94,7 +225,7 @@ async def snapshot(coin):
             "orderbook_imbalance": round(imbalance, 4), "bid_top10": bid, "ask_top10": ask,
             "trend_pct": round(trend, 4), "volatility_pct": round(vol, 4),
             "last_close": close[-1] if close else None, "sample_size": len(close),
-            "time_ms": int(time.time() * 1000), "network": NETWORK}
+            "time_ms": int(time.time() * 1000), "network": NETWORK, "source": "rest"}
 
 
 def baseline(m):
@@ -254,10 +385,89 @@ def decide(market, agents):
     return "WAIT"
 
 
+# ---------------------------------------------------------------- автономный цикл
+# Владелец 05.11.26: «чтобы я не тыкал токен и не нажимал собрать совет, пусть
+# ждёт идеального совета». Значит: приложение само смотрит рынок по кругу, а
+# модель зовём ТОЛЬКО когда правило рынка нашло повод. Иначе каждый круг стоил
+# бы 24 запроса к модели впустую.
+STATE = {"markets": {}, "council": {}, "updated_ms": 0, "rounds": 0,
+         "signals": 0, "last_signal_ms": 0}
+_state_mtime = {}
+
+
+async def run_council(coin: str) -> dict:
+    """Полный совет по монете: шесть ролей + правило рынка."""
+    m = await snapshot(coin)
+    first = await asyncio.gather(*(call_llm(r, m, []) for r in ROLES[:4]))
+    skeptic = await call_llm("Skeptic", m, first)
+    chief = await call_llm("Chief", m, [*first, skeptic])
+    agents = [*first, skeptic, chief]
+    decision = decide(m, agents)
+    data = {"market": m, "agents": agents, "baseline": baseline(m),
+            "decision": decision, "advisory_only": True,
+            "exchange_order_sent": False, "ts": int(time.time() * 1000)}
+    with database() as con:
+        con.execute("INSERT INTO deliberations(ts,coin,response) VALUES(?,?,?)",
+                    (int(time.time()), m["coin"], json.dumps(data)))
+    return data
+
+
+async def watch_loop():
+    """Крутится сам: рынок смотрим всегда, модель зовём только на сигнал."""
+    await asyncio.sleep(3)
+    while True:
+        STATE["rounds"] += 1
+        for coin in COIN_LIST:
+            try:
+                m = await snapshot(coin)
+                STATE["markets"][coin] = m
+                STATE["updated_ms"] = int(time.time() * 1000)
+                base = baseline(m)
+                if base == "WAIT":
+                    continue
+                # Повод есть — зовём совет, но не чаще раза в COOLDOWN.
+                now = time.time()
+                if now - _state_mtime.get(coin, 0) < COUNCIL_COOLDOWN:
+                    continue
+                _state_mtime[coin] = now
+                data = await run_council(coin)
+                STATE["council"][coin] = data
+                if data["decision"] in ("LONG", "SHORT"):
+                    STATE["signals"] += 1
+                    STATE["last_signal_ms"] = data["ts"]
+            except Exception:
+                continue
+        await asyncio.sleep(LOOP_SECONDS)
+
+
+@app.on_event("startup")
+async def _start_watch():
+    asyncio.create_task(FEED.start())
+    asyncio.create_task(watch_loop())
+
+
 # ---------------------------------------------------------------- API
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return (ROOT / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/api/latest")
+async def latest():
+    """Публично: последние посчитанные данные. Токен не нужен — это ЧТЕНИЕ.
+
+    Владелец 05.11.26: «просто заходить в бота». Экран не должен требовать
+    ввода ключа: он показывает то, что сервер уже посчитал сам.
+    """
+    return {"markets": STATE["markets"], "council": STATE["council"],
+            "updated_ms": STATE["updated_ms"], "rounds": STATE["rounds"],
+            "signals": STATE["signals"], "last_signal_ms": STATE["last_signal_ms"],
+            "loop_seconds": LOOP_SECONDS, "exchange": NETWORK,
+            "feed": {"ready": FEED.ready, "messages": FEED.messages,
+                     "reconnects": FEED.reconnects, "last_ms": FEED.last_ms,
+                     "fresh": FEED.fresh()},
+            "model_enabled": bool(os.getenv("ROOM_SIX_LLM_API_KEY")
+                                  and os.getenv("ROOM_SIX_LLM_MODEL"))}
 
 
 @app.get("/api/health")
@@ -291,24 +501,15 @@ async def status(authorization: Optional[str] = Header(None)):
 
 @app.post("/api/agents/deliberate/{coin}")
 async def deliberate(coin: str, authorization: Optional[str] = Header(None)):
+    """Собрать совет вручную (кнопкой или curl). Экран его больше не требует."""
     auth(authorization)
+    clean_coin(coin)
     try:
-        m = await snapshot(coin)
+        return await run_council(coin)
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(503, "Hyperliquid market data unavailable")
-    first = await asyncio.gather(*(call_llm(r, m, []) for r in ROLES[:4]))
-    skeptic = await call_llm("Skeptic", m, first)
-    chief = await call_llm("Chief", m, [*first, skeptic])
-    agents = [*first, skeptic, chief]
-    decision = decide(m, agents)
-    data = {"market": m, "agents": agents, "baseline": baseline(m),
-            "decision": decision, "advisory_only": True, "exchange_order_sent": False}
-    with database() as con:
-        con.execute("INSERT INTO deliberations(ts,coin,response) VALUES(?,?,?)",
-                    (int(time.time()), m["coin"], json.dumps(data)))
-    return data
 
 
 @app.get("/api/history")
