@@ -450,11 +450,19 @@ async def watch_loop():
                     STATE["signals"] += 1
                     STATE["last_signal_ms"] = data["ts"]
                     add_event(f"СИГНАЛ {data['decision']} {coin}: совет и правило сошлись", "signal")
+                    await maybe_open(coin, data["decision"], m, "совет и правило сошлись")
                 else:
                     add_event(f"{coin}: правило {base}, но совет воздержался", "wait")
             except Exception as exc:
                 add_event(f"{coin}: сбой данных ({type(exc).__name__})", "err")
                 continue
+        # Стопы и трейлинг по открытым позициям — каждый круг.
+        for coin, why in check_stops(STATE["markets"]):
+            try:
+                await maybe_close(coin, STATE["markets"].get(coin) or {}, why)
+            except Exception as exc:
+                add_event(f"{coin}: закрытие сбоем ({type(exc).__name__})", "err")
+
         if found:
             add_event("повод есть: " + ", ".join(found))
         else:
@@ -467,6 +475,167 @@ async def watch_loop():
 async def _start_watch():
     asyncio.create_task(FEED.start())
     asyncio.create_task(watch_loop())
+
+
+# ---------------------------------------------------------------- исполнитель
+# Владелец 05.11.26: «добавь чтобы он мог открывать и закрывать ордера».
+#
+# ПО УМОЛЧАНИЮ ВЫКЛЮЧЕНО. ROOM_SIX_EXECUTE:
+#   off  - ордера не отправляются вовсе (по умолчанию);
+#   dry  - бот РЕШАЕТ и пишет в журнал, что отправил бы, но на биржу не идёт;
+#   live - настоящие ордера через API-кошелёк.
+#
+# Ключ API-кошелька умеет ТОРГОВАТЬ, но НЕ ВЫВОДИТЬ деньги — главный кошелёк
+# на сервере не хранится. Это правило из CLAUDE.md, и оно не обсуждается.
+EXECUTE = os.getenv("ROOM_SIX_EXECUTE", "off").strip().lower()
+MAX_TRADE_USD = float(os.getenv("ROOM_SIX_MAX_TRADE_USD", "10"))
+MAX_POSITIONS = int(os.getenv("ROOM_SIX_MAX_POSITIONS", "2"))
+STOP_PCT = float(os.getenv("ROOM_SIX_STOP_PCT", "6"))
+TRAIL_AFTER_PCT = float(os.getenv("ROOM_SIX_TRAIL_AFTER_PCT", "12"))
+TRAIL_STOP_PCT = float(os.getenv("ROOM_SIX_TRAIL_STOP_PCT", "6"))
+DAILY_LOSS_USD = float(os.getenv("ROOM_SIX_DAILY_LOSS_USD", "5"))
+
+POSITIONS = {}          # coin -> {side, entry, size, stop, trail, opened_ms, dry}
+DAY = {"date": None, "realized": 0.0, "closed": 0}
+
+
+def _roll_day():
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if DAY["date"] != today:
+        DAY.update({"date": today, "realized": 0.0, "closed": 0})
+
+
+def _exchange():
+    """Ленивый SDK: без ключа приложение работает как раньше, без ордеров."""
+    from eth_account import Account
+    from hyperliquid.exchange import Exchange
+    key = os.getenv("ROOM_SIX_HL_KEY", "").strip()
+    acct = os.getenv("ROOM_SIX_HL_ACCOUNT", "").strip()
+    if not key or not acct:
+        raise RuntimeError("ROOM_SIX_HL_KEY / ROOM_SIX_HL_ACCOUNT не заданы")
+    base = ("https://api.hyperliquid-testnet.xyz" if NETWORK == "testnet"
+            else "https://api.hyperliquid.xyz")
+    return Exchange(Account.from_key(key), base_url=base, account_address=acct)
+
+
+def _sz_for(coin, price, usd):
+    """Размер в монетах, округлённый вниз до шага монеты."""
+    if price <= 0:
+        return 0.0
+    raw = usd / price
+    try:
+        from hyperliquid.utils import constants  # noqa: F401
+    except Exception:
+        pass
+    # Простое округление: 4 знака для дешёвых, 3 для дорогих.
+    return round(raw, 4) if raw < 100 else round(raw, 3)
+
+
+async def order_market(coin, is_buy, price, usd, reduce_only=False):
+    """Отправка рыночного ордера. Возвращает словарь с результатом."""
+    sz = _sz_for(coin, price, usd)
+    if sz <= 0:
+        return {"ok": False, "error": "размер вышел нулевым"}
+    dry = EXECUTE != "live"
+    if EXECUTE == "off":
+        return {"ok": False, "error": "исполнение выключено (ROOM_SIX_EXECUTE=off)"}
+    if dry:
+        return {"ok": True, "dry": True, "coin": coin, "is_buy": is_buy, "sz": sz,
+                "note": "dry-run: ордер не отправлен"}
+    try:
+        ex = _exchange()
+        # Рыночная заявка = лимит со проскальзыванием 1% и tif Ioc.
+        slip = 1.01 if is_buy else 0.99
+        res = ex.order(coin, is_buy, sz, round(price * slip, 6),
+                       {"limit": {"tif": "Ioc"}}, reduce_only=reduce_only)
+        ok = bool((res or {}).get("status") == "ok")
+        return {"ok": ok, "raw": res, "coin": coin, "is_buy": is_buy, "sz": sz}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+
+async def maybe_open(coin, decision, market, reason):
+    """Открыть позицию по решению совета, если исполнитель разрешает."""
+    if EXECUTE == "off":
+        return None
+    _roll_day()
+    if decision not in ("LONG", "SHORT"):
+        return None
+    if coin in POSITIONS:
+        return None
+    if len(POSITIONS) >= MAX_POSITIONS:
+        add_event(f"{coin}: мест нет ({len(POSITIONS)}/{MAX_POSITIONS})", "wait")
+        return None
+    if DAY["realized"] <= -abs(DAILY_LOSS_USD):
+        add_event(f"дневной лимит убытка {DAY['realized']:.2f}$ — торговля до завтра", "err")
+        return None
+    price = float(market.get("price") or 0)
+    if price <= 0:
+        return None
+    is_buy = decision == "LONG"
+    res = await order_market(coin, is_buy, price, MAX_TRADE_USD)
+    if not res.get("ok"):
+        add_event(f"{coin}: ордер НЕ отправлен — {res.get('error')}", "err")
+        return None
+    stop = price * (1 - STOP_PCT / 100) if is_buy else price * (1 + STOP_PCT / 100)
+    POSITIONS[coin] = {"coin": coin, "side": decision, "entry": price,
+                       "size": res.get("sz"), "stop": stop, "trail": None,
+                       "opened_ms": int(time.time() * 1000), "dry": bool(res.get("dry")),
+                       "reason": reason[:200]}
+    add_event(f"{'[ПРИМЕР] ' if res.get('dry') else ''}ОТКРЫТ {decision} {coin} "
+              f"${MAX_TRADE_USD:g} по {price:g}, стоп {stop:g}", "signal")
+    return POSITIONS[coin]
+
+
+async def maybe_close(coin, market, why):
+    """Закрыть позицию. Стоп, трейлинг или рука владельца."""
+    pos = POSITIONS.get(coin)
+    if not pos:
+        return None
+    price = float(market.get("price") or 0)
+    if price <= 0:
+        return None
+    is_buy = pos["side"] == "SHORT"   # закрытие шорта = покупка
+    res = await order_market(coin, is_buy, price, MAX_TRADE_USD, reduce_only=True)
+    if not res.get("ok"):
+        add_event(f"{coin}: закрыть не вышло — {res.get('error')}", "err")
+        return None
+    move = (price - pos["entry"]) / pos["entry"] * 100
+    pnl = (move if pos["side"] == "LONG" else -move) / 100 * MAX_TRADE_USD
+    DAY["realized"] += pnl
+    DAY["closed"] += 1
+    POSITIONS.pop(coin, None)
+    add_event(f"{'[ПРИМЕР] ' if pos.get('dry') else ''}ЗАКРЫТ {pos['side']} {coin} "
+              f"по {price:g} ({pnl:+.2f}$), причина: {why}", "signal" if pnl >= 0 else "err")
+    return {"coin": coin, "pnl": pnl, "why": why}
+
+
+def check_stops(markets):
+    """Стоп и трейлинг: вызывается каждый круг."""
+    todo = []
+    for coin, pos in list(POSITIONS.items()):
+        m = markets.get(coin)
+        if not m:
+            continue
+        price = float(m.get("price") or 0)
+        if price <= 0:
+            continue
+        move = (price - pos["entry"]) / pos["entry"] * 100
+        eff = move if pos["side"] == "LONG" else -move
+        # стоп
+        hit = (pos["side"] == "LONG" and price <= pos["stop"]) or \
+              (pos["side"] == "SHORT" and price >= pos["stop"])
+        if hit:
+            todo.append((coin, "стоп"))
+            continue
+        # трейлинг после +TRAIL_AFTER_PCT
+        if eff >= TRAIL_AFTER_PCT and not pos.get("trail"):
+            trail = price * (1 - TRAIL_STOP_PCT / 100) if pos["side"] == "LONG" \
+                    else price * (1 + TRAIL_STOP_PCT / 100)
+            pos["trail"] = trail
+            pos["stop"] = trail
+            add_event(f"{coin}: прибыль {eff:+.1f}% — трейлинг подтянут до {trail:g}", "signal")
+    return todo
 
 
 # ---------------------------------------------------------------- API
@@ -487,11 +656,37 @@ async def latest():
             "signals": STATE["signals"], "last_signal_ms": STATE["last_signal_ms"],
             "loop_seconds": LOOP_SECONDS, "exchange": NETWORK,
             "events": STATE["events"], "next_round_ms": STATE["next_round_ms"],
+            "execute": EXECUTE, "positions": POSITIONS,
+            "max_positions": MAX_POSITIONS, "max_trade_usd": MAX_TRADE_USD,
             "feed": {"ready": FEED.ready, "messages": FEED.messages,
                      "reconnects": FEED.reconnects, "last_ms": FEED.last_ms,
                      "fresh": FEED.fresh()},
             "model_enabled": bool(os.getenv("ROOM_SIX_LLM_API_KEY")
                                   and os.getenv("ROOM_SIX_LLM_MODEL"))}
+
+
+@app.get("/api/positions")
+async def positions():
+    """Открытые позиции. Публично — это ЧТЕНИЕ."""
+    _roll_day()
+    return {"execute": EXECUTE, "max_trade_usd": MAX_TRADE_USD,
+            "max_positions": MAX_POSITIONS, "stop_pct": STOP_PCT,
+            "trail_after_pct": TRAIL_AFTER_PCT, "positions": POSITIONS,
+            "day": DAY}
+
+
+@app.post("/api/close/{coin}")
+async def close_coin(coin: str, authorization: Optional[str] = Header(None)):
+    """Закрыть позицию рукой владельца. Требует токен."""
+    auth(authorization)
+    coin = clean_coin(coin)
+    if coin not in POSITIONS:
+        raise HTTPException(404, "открытой позиции нет")
+    m = STATE["markets"].get(coin) or await snapshot(coin)
+    res = await maybe_close(coin, m, "закрыто владельцем")
+    if not res:
+        raise HTTPException(503, "закрыть не вышло — смотри журнал")
+    return res
 
 
 @app.get("/api/health")

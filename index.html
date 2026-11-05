@@ -69,6 +69,9 @@ body{margin:0;font-family:Inter,system-ui,Arial,sans-serif;color:var(--ink);back
     <span class="muted" id="bannerSub">кругов: 0 · сигналов: 0</span>
   </div>
 
+  <div class="sec" id="posSec" style="display:none">Позиции бота</div>
+  <div class="grid" id="positions"></div>
+
   <div class="livebar">
     <span>следующий круг через <b id="cd">—</b></span>
     <div class="prog"><i id="prog" style="width:0%"></i></div>
@@ -137,6 +140,27 @@ function renderCouncil(council){
   }).join('');
 }
 
+function renderPositions(data){
+  const pos = data.positions || {};
+  const keys = Object.keys(pos);
+  const sec = $('posSec');
+  if(!keys.length){ sec.style.display='none'; $('positions').innerHTML=''; return; }
+  sec.style.display='block';
+  const mode = data.execute === 'live' ? 'БОЕВОЙ' : (data.execute === 'dry' ? 'ПРИМЕР' : 'ВЫКЛ');
+  $('positions').innerHTML = keys.map(k => {
+    const p = pos[k];
+    const cls = p.side === 'LONG' ? 'long' : 'short';
+    const tag = p.dry ? ' <span class="pill wait">пример</span>' : '';
+    return `<div class="card">
+      <div class="coin"><span class="n">${k}</span><span class="pill ${cls}">${p.side}</span></div>
+      <div class="kv"><span>Вход</span><b>${p.entry}</b></div>
+      <div class="kv"><span>Стоп</span><b class="dn">${p.stop}</b></div>
+      <div class="kv"><span>Размер</span><b>$${data.max_trade_usd}${tag}</b></div>
+      <div class="kv"><span>Режим</span><b>${mode}</b></div>
+    </div>`;
+  }).join('');
+}
+
 function renderLog(events){
   if(!events || !events.length) return;
   $('log').innerHTML = events.slice(0, 14).map(e => {
@@ -171,6 +195,7 @@ async function tick(){
     renderCouncil(d.council || {});
     renderBanner(d);
     renderLog(d.events);
+    renderPositions(d);
     if(d.feed){ $('msg').textContent = d.feed.messages || 0; }
     window.__nextRound = d.next_round_ms || 0;
     $('status').textContent = 'автономный · ' + (d.model_enabled ? 'ИИ включён' : 'формулы');
