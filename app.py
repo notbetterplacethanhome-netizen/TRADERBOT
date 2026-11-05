@@ -7,7 +7,7 @@
 вместо формулы; если нет — считает формула. Без ключа приложение полностью
 работоспособно и бесплатно.
 """
-import os, json, time, secrets, asyncio, sqlite3, statistics
+import os, json, re, time, secrets, asyncio, sqlite3, statistics
 from pathlib import Path
 from typing import Optional
 import httpx
@@ -187,24 +187,35 @@ async def call_llm(role, market, prior):
            "Return one JSON object with keys vote (LONG, SHORT, WAIT) and reason. "
            "Do not invent feeds, prices or executions. Chief must WAIT on ambiguity. "
            "Your output is advisory only.")
-    body = {"model": model, "temperature": 0,
+    # max_tokens обязателен: «думающие» модели тратят весь бюджет на рассуждение
+    # и возвращают ПУСТОЙ content (проверено на deepseek-v4-pro: finish=length,
+    # content='', весь ответ ушёл в reasoning_content).
+    body = {"model": model, "temperature": 0, "max_tokens": 900,
             "messages": [{"role": "system", "content": msg},
                          {"role": "user", "content": json.dumps(
                              {"market": market, "previous": prior}, ensure_ascii=False)}]}
     try:
-        async with httpx.AsyncClient(timeout=35) as cli:
+        async with httpx.AsyncClient(timeout=60) as cli:
             response = await cli.post(root + "/chat/completions",
                                       headers={"Authorization": "Bearer " + key}, json=body)
             response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-        value = json.loads(content.strip().removeprefix("```json").removesuffix("```").strip())
+            message = response.json()["choices"][0]["message"]
+            # Обычная модель кладёт ответ в content, думающая — в reasoning_content.
+            content = (message.get("content") or "").strip()
+            if not content:
+                content = (message.get("reasoning_content") or "").strip()
+        # Вытаскиваем ПЕРВЫЙ JSON-объект: модели любят обрамлять его словами.
+        match = re.search(r"\{.*\}", content, re.S)
+        if not match:
+            raise ValueError("no JSON in model answer")
+        value = json.loads(match.group(0))
         vote = value.get("vote", "WAIT")
         if vote not in ("LONG", "SHORT", "WAIT"):
             vote = "WAIT"
         return {"role": role, "vote": vote, "reason": str(value.get("reason", ""))[:500],
                 "connected": True, "source": "model"}
     except Exception:
-        # Модель недоступна — НЕ теряем анализ: считаем формулой.
+        # Модель недоступна или ответила мусором — НЕ теряем анализ.
         return role_vote(role, market, prior)
 
 
