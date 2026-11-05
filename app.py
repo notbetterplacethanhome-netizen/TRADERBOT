@@ -56,7 +56,7 @@ async def call_llm(role, market, prior):
     model=os.getenv("ROOM_SIX_LLM_MODEL","")
     if not key or not model: return {"role":role,"vote":"WAIT","reason":"LLM is not configured","connected":False}
     root=os.getenv("ROOM_SIX_LLM_BASE_URL","https://api.openai.com/v1").rstrip("/")
-    msg="You are "+role+" in an audit-focused crypto paper-analysis team. Only use supplied public market data. News: no news feed; abstain. Return ONLY JSON: {\\\"vote\\\":\\\"LONG|SHORT|WAIT\\\",\\\"reason\\\":\\\"brief explanation\\\"}. No promises or fictitious feeds. Chief must WAIT on ambiguity. No direct order authority."
+    msg="You are "+role+" in an audit-focused crypto paper-analysis team. Use ONLY supplied public market data. News has no feed and MUST abstain. Return one JSON object with keys vote (LONG, SHORT, WAIT) and reason. Do not invent feeds, prices or executions. Chief must WAIT on ambiguity. Your output is advisory only."
     body={"model":model,"temperature":0,"messages":[{"role":"system","content":msg},{"role":"user","content":json.dumps({"market":market,"previous":prior},ensure_ascii=False)}]}
     try:
         async with httpx.AsyncClient(timeout=35) as cli:
